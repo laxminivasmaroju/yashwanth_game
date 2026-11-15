@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Data Siege</title>
+<style>
+:root{--bg:#10201c;--panel:#18322b;--ink:#eaf5ee;--mute:#8fb3a3;--blue:#3d8bff;--red:#ff5a4f;--gold:#ffc83d;--elix:#c04bff}
+@media (prefers-color-scheme: light){:root{--bg:#10201c}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:"Trebuchet MS","Segoe UI",Verdana,sans-serif;user-select:none}
+#app{max-width:420px;margin:0 auto;height:100%;display:flex;flex-direction:column;position:relative}
+#top{display:flex;justify-content:space-between;align-items:center;padding:6px 12px;font-weight:700;font-size:15px}
+#top .e{color:var(--red)}#top .p{color:var(--blue)}
+#wrap{position:relative;flex:0 1 auto;line-height:0}
+canvas{width:100%;height:auto;max-height:calc(100vh - 190px);display:block;touch-action:none;cursor:crosshair;margin:0 auto}
+#bar{background:var(--panel);padding:8px 10px 12px}
+#cards{display:flex;gap:8px}
+.card{flex:1;background:#0d1a17;border:2px solid #2d5246;border-radius:10px;color:var(--ink);padding:6px 4px;cursor:pointer;font:inherit;text-align:center;position:relative}
+.card.sel{border-color:var(--gold);transform:translateY(-4px)}
+.card.no{opacity:.45}
+.card b{display:block;font-size:14px}
+.card small{color:var(--mute);font-size:11px;display:block}
+.cost{position:absolute;top:-8px;right:-6px;background:var(--elix);border-radius:50%;width:24px;height:24px;line-height:24px;font-weight:700;font-size:13px}
+.key{position:absolute;top:2px;left:6px;color:var(--mute);font-size:11px}
+.icon{height:34px;margin:4px 0}
+#elx{margin-top:10px;height:18px;background:#0d1a17;border-radius:9px;position:relative;overflow:hidden}
+#elx i{position:absolute;inset:0 auto 0 0;background:var(--elix);width:0}
+#elx span{position:absolute;inset:0;text-align:center;font-size:12px;line-height:18px;font-weight:700}
+#ov{position:absolute;inset:0;background:rgba(8,18,15,.86);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;gap:10px}
+#ov h1{font-size:40px;margin:0;letter-spacing:1px;color:var(--gold)}
+#ov h2{margin:0;font-size:30px}
+#ov p{margin:0;color:var(--mute);max-width:300px;line-height:1.45;font-size:14px}
+#ov button{margin-top:8px;font:inherit;font-weight:700;font-size:18px;padding:12px 30px;border-radius:12px;border:0;background:var(--gold);color:#2a1d00;cursor:pointer}
+#ov button:focus-visible,.card:focus-visible{outline:3px solid #fff;outline-offset:2px}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="top"><span class="e" id="ec">Enemy 0</span><span id="clock">3:00</span><span class="p" id="pc">You 0</span></div>
+  <div id="wrap">
+    <canvas id="c" width="360" height="600"></canvas>
+    <div id="ov">
+      <h1 id="ovt">DATA SIEGE</h1>
+      <h2 id="ovh" class="hide"></h2>
+      <p id="ovp">Hold the field. Pick a unit, then tap your half of the battlefield to deploy it. Destroy the enemy King Tower, or lead on crowns when time runs out.</p>
+      <p id="rec"></p>
+      <button id="go">Start battle</button>
+      <p>Keys: 1 / 2 / 3 select &middot; Esc cancel &middot; R restart</p>
+    </div>
+  </div>
+  <div id="bar">
+    <div id="cards"></div>
+    <div id="elx"><i id="ef"></i><span id="et">5 / 10</span></div>
+  </div>
+</div>
+<script>
+(()=>{
+"use strict";
+const cv=document.getElementById("c"),g=cv.getContext("2d");
+const W=360,H=600,RIVER=300,BR=[90,270],BW=44;
+const T={
+ guardian:{name:"Guardian",cost:3,hp:320,dmg:26,range:14,spd:38,cd:1.0,r:12,n:1,col:"#5aa0ff",air:false,tower:false,info:"Tank melee"},
+ ranger:{name:"Ranger",cost:3,hp:95,dmg:20,range:85,spd:46,cd:0.9,r:8,n:2,col:"#5fe0a6",ranged:true,info:"2 archers"},
+ titan:{name:"Titan",cost:5,hp:760,dmg:52,range:16,spd:24,cd:1.4,r:17,n:1,col:"#ffb04a",tower:true,info:"Hits towers only"}
+};
+const KEYS=["guardian","ranger","titan"];
+let S,sel=null,mouse=null,raf,last=0,best=0;
+try{best=+localStorage.getItem("ds_wins")||0}catch(e){}
+
+function mkTower(side,king,x,y){return{side,king,x,y,hp:king?1400:700,max:king?1400:700,r:king?26:21,cd:0,range:king?125:115,dmg:king?34:28,dead:false}}
+function reset(){
+ S={t:180,pe:5,ee:5,eT:2,units:[],tw:[
+  mkTower(1,0,90,120),mkTower(1,0,270,120),mkTower(1,1,180,55),
+  mkTower(0,0,90,480),mkTower(0,0,270,480),mkTower(0,1,180,545)],
+  proj:[],fx:[],cr:[0,0],over:false,run:true};
+ sel=null;sync();
+}
+// side 0 = player (bottom), side 1 = enemy (top)
+function spawn(type,side,x,y){
+ const d=T[type];
+ for(let i=0;i<d.n;i++)S.units.push({type,side,x:x+(i?(i%2?14:-14):0),y:y+(side?1:-1)*(i?6:0),hp:d.hp,max:d.hp,cd:d.cd*.5,r:d.r});
+}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function nearest(from,list,maxd){let b=null,bd=maxd??1e9;for(const o of list){const d=dist(from,o);if(d<bd){bd=d;b=o}}return b}
+
+function update(dt){
+ S.t-=dt;
+ if(S.t<=0){finish();return}
+ const reg=dt/2.6;S.pe=Math.min(10,S.pe+reg);S.ee=Math.min(10,S.ee+reg);
+ // enemy AI
+ S.eT-=dt;
+ if(S.eT<=0){
+  S.eT=2.4+Math.random()*2;
+  const aff=KEYS.filter(k=>T[k].cost<=S.ee);
+  if(aff.length){
+   // read the threat: lane where the player has most units, else random
+   const mine=S.units.filter(u=>u.side===0);
+   const l=mine.length?(mine.filter(u=>u.x<180).length>=mine.length/2?0:1):(Math.random()<.5?0:1);
+   const k=aff[Math.floor(Math.random()*aff.length)];
+   S.ee-=T[k].cost;
+   spawn(k,1,BR[l]+(Math.random()*30-15),170+Math.random()*40);
+  }
+ }
+ // units
+ for(const u of S.units){
+  const d=T[u.type],foes=S.units.filter(o=>o.side!==u.side&&o.hp>0),
+  tws=S.tw.filter(t=>t.side!==u.side&&!t.dead);
+  let tg=d.tower?null:nearest(u,foes,95);
+  if(!tg)tg=nearest(u,tws);
+  u.tg=tg;if(!tg)continue;
+  const gap=dist(u,tg)-(tg.r||0)-u.r;
+  if(gap<=d.range){
+   u.cd-=dt;
+   if(u.cd<=0){u.cd=d.cd;
+    if(d.ranged)S.proj.push({x:u.x,y:u.y,tg,dmg:d.dmg,side:u.side,col:d.col});
+    else hit(tg,d.dmg);
+   }
+  }else{
+   let gx=tg.x,gy=tg.y;
+   const cross=(u.y-RIVER)*(gy-RIVER)<0;
+   if(cross){
+    const bx=Math.abs(u.x-BR[0])<Math.abs(u.x-BR[1])?BR[0]:BR[1];
+    if(Math.abs(u.x-bx)>BW/2-6){gx=bx;gy=RIVER+(u.y>RIVER?22:-22)}
+    else{gx=bx;gy=tg.y}
+   }
+   const a=Math.atan2(gy-u.y,gx-u.x);
+   u.x+=Math.cos(a)*d.spd*dt;u.y+=Math.sin(a)*d.spd*dt;
+  }
+  // keep out of water
+  if(Math.abs(u.y-RIVER)<10){const bx=Math.abs(u.x-BR[0])<Math.abs(u.x-BR[1])?BR[0]:BR[1];u.x=Math.max(bx-BW/2+8,Math.min(bx+BW/2-8,u.x))}
+ }
+ // separation
+ for(let i=0;i<S.units.length;i++)for(let j=i+1;j<S.units.length;j++){
+  const a=S.units[i],b=S.units[j],d=dist(a,b),m=a.r+b.r-2;
+  if(d<m&&d>0.01){const p=(m-d)/2,nx=(a.x-b.x)/d,ny=(a.y-b.y)/d;a.x+=nx*p;a.y+=ny*p;b.x-=nx*p;b.y-=ny*p}
+ }
+ // towers
+ for(const t of S.tw){
+  if(t.dead)continue;t.cd-=dt;
+  const f=nearest(t,S.units.filter(u=>u.side!==t.side),t.range+8);
+  if(f&&t.cd<=0){t.cd=0.9;S.proj.push({x:t.x,y:t.y,tg:f,dmg:t.dmg,side:t.side,col:t.side?"#ff8a7a":"#8ec3ff"})}
+ }
+ // projectiles
+ for(const p of S.proj){
+  const tg=p.tg;if(tg.hp<=0||tg.dead){p.done=true;continue}
+  const d=dist(p,tg),s=260*dt;
+  if(d<=s+(tg.r||0)*.6){hit(tg,p.dmg);p.done=true}
+  else{p.x+=(tg.x-p.x)/d*s;p.y+=(tg.y-p.y)/d*s}
+ }
+ S.proj=S.proj.filter(p=>!p.done);
+ S.units=S.units.filter(u=>u.hp>0);
+ for(const f of S.fx)f.t-=dt;
+ S.fx=S.fx.filter(f=>f.t>0);
+ if(S.tw[2].dead||S.tw[5].dead)finish();
+}
+function hit(t,d){
+ t.hp-=d;S.fx.push({x:t.x+(Math.random()*10-5),y:t.y-(t.r||10),t:.5,txt:Math.round(d)});
+ if(t.max&&t.hp<=0&&t.r>=21&&!t.dead){
+  t.dead=true;t.hp=0;S.cr[t.side?0:1]+=t.king?3:1;
+  S.fx.push({x:t.x,y:t.y,t:.9,boom:true});
+ }
+}
+function finish(){
+ if(S.over)return;S.over=true;S.run=false;
+ const kp=S.tw[5].dead,ke=S.tw[2].dead;
+ let res;
+ const [pc,ec]=S.cr;
+ if(ke&&!kp)res=1;else if(kp&&!ke)res=-1;
+ else if(pc!==ec)res=pc>ec?1:-1;
+ else{const ph=S.tw.filter(t=>t.side===0).reduce((a,t)=>a+t.hp,0),eh=S.tw.filter(t=>t.side===1).reduce((a,t)=>a+t.hp,0);res=ph>eh?1:ph<eh?-1:0}
+ if(res>0){best++;try{localStorage.setItem("ds_wins",best)}catch(e){}}
+ showOv(res>0?"Victory":res<0?"Defeat":"Draw",`Crowns ${S.cr[1]} : ${S.cr[0]}`,"Play again");
+}
+function showOv(h,p,b){
+ document.getElementById("ovt").classList.add("hide");
+ const ovh=document.getElementById("ovh");ovh.classList.remove("hide");ovh.textContent=h;
+ document.getElementById("ovp").textContent=p;
+ document.getElementById("rec").textContent="Wins saved on this device: "+best;
+ document.getElementById("go").textContent=b;
+ document.getElementById("ov").classList.remove("hide");
+}
+function start(){reset();document.getElementById("ov").classList.add("hide");S.run=true;last=performance.now()}
+
+// ---------- drawing ----------
+function drawField(){
+ for(let y=0;y<H;y+=40)for(let x=0;x<W;x+=40){g.fillStyle=((x+y)/40)%2?"#5fa84a":"#68b252";g.fillRect(x,y,40,40)}
+ g.fillStyle="#3f86c9";g.fillRect(0,RIVER-12,W,24);
+ g.fillStyle="rgba(255,255,255,.25)";for(let x=10;x<W;x+=46)g.fillRect(x,RIVER-4,18,2);
+ for(const bx of BR){g.fillStyle="#9b7449";g.fillRect(bx-BW/2,RIVER-16,BW,32);g.fillStyle="#7b5a35";for(let i=0;i<5;i++)g.fillRect(bx-BW/2,RIVER-14+i*7,BW,2)}
+ // lanes
+ g.fillStyle="rgba(200,170,110,.45)";for(const bx of BR){g.fillRect(bx-14,120,28,180);g.fillRect(bx-14,RIVER+12,28,170)}
+ // enemy-half tint & deploy zone hint
+ if(sel){g.fillStyle="rgba(61,139,255,.14)";g.fillRect(0,RIVER+12,W,H-RIVER-12)}
+}
+function drawTower(t){
+ g.save();g.translate(t.x,t.y);
+ const c=t.side?"#ff5a4f":"#3d8bff";
+ if(t.dead){g.fillStyle="#555";g.fillRect(-t.r,-t.r*.6,t.r*2,t.r*1.2);g.restore();return}
+ g.fillStyle="#8a8f99";g.fillRect(-t.r,-t.r,t.r*2,t.r*2);
+ g.fillStyle=c;g.fillRect(-t.r,-t.r,t.r*2,6);
+ g.fillStyle="#cfd3da";g.beginPath();g.arc(0,2,t.r*.55,0,7);g.fill();
+ g.fillStyle=c;g.beginPath();g.arc(0,2,t.r*.28,0,7);g.fill();
+ if(t.king){g.fillStyle="#ffc83d";g.beginPath();g.moveTo(-9,-t.r-2);g.lineTo(-9,-t.r-12);g.lineTo(-4,-t.r-7);g.lineTo(0,-t.r-14);g.lineTo(4,-t.r-7);g.lineTo(9,-t.r-12);g.lineTo(9,-t.r-2);g.fill()}
+ g.restore();bar(t.x,t.y-t.r-(t.king?18:8),t.r*2+6,t.hp/t.max,c);
+}
+function bar(x,y,w,f,c){g.fillStyle="rgba(0,0,0,.55)";g.fillRect(x-w/2,y,w,5);g.fillStyle=c;g.fillRect(x-w/2+1,y+1,Math.max(0,(w-2)*f),3)}
+function shape(type,r){
+ g.beginPath();
+ if(type==="guardian"){g.moveTo(-r,-r*.8);g.lineTo(r,-r*.8);g.lineTo(r,r*.2);g.lineTo(0,r);g.lineTo(-r,r*.2);}
+ else if(type==="ranger"){g.moveTo(0,-r*1.1);g.lineTo(r,r*.8);g.lineTo(-r,r*.8);}
+ else{for(let i=0;i<6;i++){const a=Math.PI/3*i;g.lineTo(Math.cos(a)*r,Math.sin(a)*r)}}
+ g.closePath();
+}
+function drawUnit(u){
+ const d=T[u.type],c=u.side?"#ff5a4f":"#3d8bff";
+ g.save();g.translate(u.x,u.y);
+ g.fillStyle="rgba(0,0,0,.25)";g.beginPath();g.ellipse(0,u.r*.8,u.r,u.r*.4,0,0,7);g.fill();
+ shape(u.type,u.r);g.fillStyle=d.col;g.fill();g.lineWidth=3;g.strokeStyle=c;g.stroke();
+ g.fillStyle="#fff";g.fillRect(-u.r*.35,-u.r*.2,u.r*.2,u.r*.2);g.fillRect(u.r*.15,-u.r*.2,u.r*.2,u.r*.2);
+ g.restore();
+ bar(u.x,u.y-u.r-9,u.r*2+8,u.hp/u.max,c);
+}
+function draw(){
+ drawField();
+ for(const t of S.tw)drawTower(t);
+ [...S.units].sort((a,b)=>a.y-b.y).forEach(drawUnit);
+ for(const p of S.proj){g.fillStyle=p.col;g.beginPath();g.arc(p.x,p.y,4,0,7);g.fill();g.strokeStyle="#fff";g.lineWidth=1;g.stroke()}
+ for(const f of S.fx){
+  if(f.boom){g.strokeStyle="rgba(255,220,90,"+f.t+")";g.lineWidth=5;g.beginPath();g.arc(f.x,f.y,50*(1-f.t),0,7);g.stroke()}
+  else{g.fillStyle="rgba(255,255,255,"+Math.min(1,f.t*2)+")";g.font="bold 12px sans-serif";g.textAlign="center";g.fillText(f.txt,f.x,f.y-(.5-f.t)*30)}
+ }
+ if(sel&&mouse){
+  const d=T[sel],y=Math.max(RIVER+22,mouse.y),ok=mouse.y>RIVER+16;
+  g.globalAlpha=.6;g.save();g.translate(mouse.x,y);shape(sel,d.r);g.fillStyle=ok?d.col:"#ff4040";g.fill();g.restore();
+  g.strokeStyle=ok?"rgba(255,255,255,.7)":"rgba(255,64,64,.8)";g.setLineDash([4,4]);g.lineWidth=1.5;g.beginPath();g.arc(mouse.x,y,d.range+d.r+6,0,7);g.stroke();g.setLineDash([]);g.globalAlpha=1;
+ }
+}
+// ---------- HUD ----------
+const cardsEl=document.getElementById("cards");
+KEYS.forEach((k,i)=>{
+ const d=T[k],b=document.createElement("button");b.className="card";b.dataset.k=k;
+ b.innerHTML=`<span class="key">${i+1}</span><span class="cost">${d.cost}</span><svg class="icon" viewBox="-20 -20 40 40" width="34" height="34"><path fill="${d.col}" stroke="#3d8bff" stroke-width="3" d="${k==="guardian"?"M-14-11H14V3L0 16-14 3Z":k==="ranger"?"M0-16L14 11H-14Z":"M17 0L8.5 14.7-8.5 14.7-17 0-8.5-14.7 8.5-14.7Z"}"/></svg><b>${d.name}</b><small>${d.info}</small>`;
+ b.onclick=()=>pick(k);cardsEl.appendChild(b);
+});
+function pick(k){if(!S||!S.run)return;sel=sel===k?null:k;sync()}
+function sync(){
+ document.querySelectorAll(".card").forEach(b=>{b.classList.toggle("sel",b.dataset.k===sel);b.classList.toggle("no",!!S&&T[b.dataset.k].cost>S.pe)});
+ document.getElementById("ef").style.width=(S.pe*10)+"%";
+ document.getElementById("et").textContent=Math.floor(S.pe)+" / 10";
+ const t=Math.max(0,Math.ceil(S.t));document.getElementById("clock").textContent=Math.floor(t/60)+":"+String(t%60).padStart(2,"0");
+ document.getElementById("pc").textContent="You "+S.cr[0];document.getElementById("ec").textContent="Enemy "+S.cr[1];
+}
+// ---------- input ----------
+function pos(e){const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height}}
+cv.addEventListener("pointermove",e=>{mouse=pos(e)});
+cv.addEventListener("pointerleave",()=>{mouse=null});
+cv.addEventListener("pointerdown",e=>{
+ mouse=pos(e);if(!S||!S.run||!sel)return;
+ const d=T[sel];
+ if(mouse.y<RIVER+16||S.pe<d.cost)return;
+ S.pe-=d.cost;spawn(sel,0,Math.max(15,Math.min(W-15,mouse.x)),Math.min(H-20,mouse.y));
+ sel=null;sync();
+});
+addEventListener("keydown",e=>{
+ if(e.key==="1")pick("guardian");else if(e.key==="2")pick("ranger");else if(e.key==="3")pick("titan");
+ else if(e.key==="Escape"){sel=null;sync()}
+ else if(e.key==="r"||e.key==="R")start();
+});
+document.getElementById("go").onclick=start;
+// ---------- loop ----------
+function loop(now){
+ const dt=Math.min(.05,(now-last)/1000);last=now;
+ if(S.run)update(dt);
+ draw();sync();raf=requestAnimationFrame(loop);
+}
+reset();S.run=false;last=performance.now();
+document.getElementById("rec").textContent="Wins saved on this device: "+best;
+raf=requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
